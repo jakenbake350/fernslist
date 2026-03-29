@@ -95,6 +95,15 @@ function useWidth() {
   }, []);
   return w;
 }
+function isOverdue(due_date) {
+  if (!due_date) return false;
+  return new Date(due_date) < new Date(new Date().toDateString());
+}
+function isDueSoon(due_date) {
+  if (!due_date) return false;
+  const diff = (new Date(due_date) - new Date()) / (1000 * 60 * 60 * 24);
+  return diff >= 0 && diff <= 3;
+}
 
 const TEXT_SIZES = { small: 11, medium: 14, large: 17 };
 const THEMES = {
@@ -104,6 +113,7 @@ const THEMES = {
     text: "#e8e8e0", textMuted: "#888", textDim: "#555", textFaint: "#3a3a3a",
     accent: "#f5a623", accentBg: "#140f00", accentText: "#000",
     inputBorder: "#333", subInputBorder: "#252525",
+    danger: "#e53935", warning: "#ff9800",
   },
   light: {
     bg: "#f5f0e8", surface: "#fffdf8", surface2: "#f0ebe0",
@@ -111,6 +121,7 @@ const THEMES = {
     text: "#1a1a14", textMuted: "#5a5248", textDim: "#8a8070", textFaint: "#b0a898",
     accent: "#c47d0a", accentBg: "#fff8ec", accentText: "#fff",
     inputBorder: "#b8b0a0", subInputBorder: "#ccc",
+    danger: "#c62828", warning: "#e65100",
   },
 };
 
@@ -121,8 +132,10 @@ export default function App() {
   const [newTask, setNewTask] = useState("");
   const [newPri, setNewPri] = useState("🟡 soon");
   const [newCat, setNewCat] = useState("printer");
+  const [newDue, setNewDue] = useState("");
   const [filter, setFilter] = useState("all");
   const [showDone, setShowDone] = useState(false);
+  const [showArchive, setShowArchive] = useState(false);
   const [expanded, setExpanded] = useState({});
   const [subInputs, setSubInputs] = useState({});
   const [checkIn, setCheckIn] = useState(false);
@@ -140,28 +153,17 @@ export default function App() {
   const TS = TEXT_SIZES[textSize];
   const boardRef = useRef(boardId);
 
-  // Load tasks from Supabase
   useEffect(() => {
     async function load() {
       setSyncStatus("connecting");
-      const { data, error } = await supabase
-        .from("tasks")
-        .select("*")
-        .eq("board_id", boardId);
-
-      if (error) {
-        setSyncStatus("error");
-        setLoaded(true);
-        return;
-      }
-
+      const { data, error } = await supabase.from("tasks").select("*").eq("board_id", boardId);
+      if (error) { setSyncStatus("error"); setLoaded(true); return; }
       if (data && data.length > 0) {
-        setTasks(data.map(r => ({ ...r, subtasks: r.subtasks || [] })));
+        setTasks(data.map(r => ({ ...r, subtasks: r.subtasks || [], notes: r.notes || "", archived: r.archived || false, sort_order: r.sort_order ?? 0 })));
       } else {
-        // First time — seed the database
-        const seeded = SEED.map(t => ({ ...t, board_id: boardId }));
-        const { error: insertErr } = await supabase.from("tasks").insert(seeded);
-        if (!insertErr) setTasks(SEED);
+        const seeded = SEED.map((t, i) => ({ ...t, board_id: boardId, notes: "", archived: false, due_date: null, sort_order: i }));
+        const { error: e } = await supabase.from("tasks").insert(seeded);
+        if (!e) setTasks(SEED.map((t, i) => ({ ...t, notes: "", archived: false, due_date: null, sort_order: i })));
       }
       setSyncStatus("synced");
       setLoaded(true);
@@ -169,53 +171,46 @@ export default function App() {
     load();
   }, [boardId]);
 
-  // Real-time subscription
   useEffect(() => {
     const channel = supabase
       .channel("tasks-changes")
-      .on("postgres_changes", {
-        event: "*",
-        schema: "public",
-        table: "tasks",
-        filter: `board_id=eq.${boardId}`,
-      }, (payload) => {
+      .on("postgres_changes", { event: "*", schema: "public", table: "tasks", filter: `board_id=eq.${boardId}` }, (payload) => {
         if (payload.eventType === "INSERT") {
-          setTasks(prev => prev.find(t => t.id === payload.new.id)
-            ? prev
-            : [...prev, { ...payload.new, subtasks: payload.new.subtasks || [] }]);
+          setTasks(prev => prev.find(t => t.id === payload.new.id) ? prev : [...prev, { ...payload.new, subtasks: payload.new.subtasks || [] }]);
         } else if (payload.eventType === "UPDATE") {
-          setTasks(prev => prev.map(t =>
-            t.id === payload.new.id ? { ...payload.new, subtasks: payload.new.subtasks || [] } : t
-          ));
+          setTasks(prev => prev.map(t => t.id === payload.new.id ? { ...payload.new, subtasks: payload.new.subtasks || [] } : t));
         } else if (payload.eventType === "DELETE") {
           setTasks(prev => prev.filter(t => t.id !== payload.old.id));
         }
         setSyncStatus("synced");
       })
       .subscribe();
-
     return () => supabase.removeChannel(channel);
   }, [boardId]);
 
   const upsertTask = useCallback(async (task) => {
     setSyncStatus("saving");
-    const { error } = await supabase
-      .from("tasks")
-      .upsert({ ...task, board_id: boardRef.current });
+    const { error } = await supabase.from("tasks").upsert({ ...task, board_id: boardRef.current });
     if (error) setSyncStatus("error");
     else setSyncStatus("synced");
   }, []);
 
   const deleteTask = useCallback(async (id) => {
     setSyncStatus("saving");
-    const { error } = await supabase
-      .from("tasks")
-      .delete()
-      .eq("id", id)
-      .eq("board_id", boardRef.current);
+    const { error } = await supabase.from("tasks").delete().eq("id", id).eq("board_id", boardRef.current);
     if (error) setSyncStatus("error");
     else setSyncStatus("synced");
   }, []);
+
+  const mutate = useCallback((id, changes) => {
+    setTasks(prev => {
+      const task = prev.find(t => t.id === id);
+      if (!task) return prev;
+      const updated = { ...task, ...changes };
+      upsertTask(updated);
+      return prev.map(t => t.id === id ? updated : t);
+    });
+  }, [upsertTask]);
 
   const toggle = useCallback((id) => {
     setTasks(prev => {
@@ -228,7 +223,7 @@ export default function App() {
   }, [upsertTask]);
 
   const remove = useCallback((id) => {
-    if (!confirm("Delete this task?")) return;
+    if (!confirm("Permanently delete? This cannot be undone.")) return;
     setTasks(prev => prev.filter(t => t.id !== id));
     deleteTask(id);
   }, [deleteTask]);
@@ -236,19 +231,16 @@ export default function App() {
   const addTask = useCallback(() => {
     if (!newTask.trim()) return;
     const task = {
-      id: Date.now(),
-      text: newTask.trim(),
-      priority: newPri,
-      category: newCat,
-      done: false,
-      created: today(),
-      subtasks: [],
+      id: Date.now(), text: newTask.trim(), priority: newPri, category: newCat,
+      done: false, created: today(), subtasks: [], notes: "", archived: false,
+      due_date: newDue || null, sort_order: tasks.length,
     };
     setTasks(prev => [...prev, task]);
     upsertTask(task);
     setNewTask("");
+    setNewDue("");
     if (mobile) setPanelOpen(false);
-  }, [newTask, newPri, newCat, mobile, upsertTask]);
+  }, [newTask, newPri, newCat, newDue, tasks.length, mobile, upsertTask]);
 
   const toggleSub = useCallback((tid, sid) => {
     setTasks(prev => {
@@ -285,60 +277,53 @@ export default function App() {
 
   const saveEdit = useCallback((id) => {
     if (!editText.trim()) { setEditingId(null); return; }
-    setTasks(prev => {
-      const task = prev.find(t => t.id === id);
-      if (!task) return prev;
-      const updated = { ...task, text: editText.trim() };
-      upsertTask(updated);
-      return prev.map(t => t.id === id ? updated : t);
-    });
+    mutate(id, { text: editText.trim() });
     setEditingId(null);
-  }, [editText, upsertTask]);
+  }, [editText, mutate]);
 
-  const changePri = useCallback((id, priority) => {
+  const moveTask = useCallback((id, dir) => {
     setTasks(prev => {
-      const task = prev.find(t => t.id === id);
-      if (!task) return prev;
-      const updated = { ...task, priority };
-      upsertTask(updated);
-      return prev.map(t => t.id === id ? updated : t);
-    });
-  }, [upsertTask]);
-
-  const changeCat = useCallback((id, category) => {
-    setTasks(prev => {
-      const task = prev.find(t => t.id === id);
-      if (!task) return prev;
-      const updated = { ...task, category };
-      upsertTask(updated);
-      return prev.map(t => t.id === id ? updated : t);
+      const sorted = [...prev].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+      const idx = sorted.findIndex(t => t.id === id);
+      const swapIdx = idx + dir;
+      if (swapIdx < 0 || swapIdx >= sorted.length) return prev;
+      const a = sorted[idx], b = sorted[swapIdx];
+      const aOrder = a.sort_order ?? idx, bOrder = b.sort_order ?? swapIdx;
+      upsertTask({ ...a, sort_order: bOrder });
+      upsertTask({ ...b, sort_order: aOrder });
+      return prev.map(t => {
+        if (t.id === a.id) return { ...t, sort_order: bOrder };
+        if (t.id === b.id) return { ...t, sort_order: aOrder };
+        return t;
+      });
     });
   }, [upsertTask]);
 
   const saveTheme = (t) => { setTheme(t); localStorage.setItem("fern-theme", t); };
   const saveTextSize = (s) => { setTextSize(s); localStorage.setItem("fern-text-size", s); };
-
   const handleImportId = () => {
     const trimmed = importId.trim();
     if (!trimmed) return;
-    if (!confirm("Switch to a different board? Make sure you've saved your current board ID first.")) return;
+    if (!confirm("Switch boards? Save your current board ID first if needed.")) return;
     setBoardId(trimmed);
     window.location.reload();
   };
 
-  const visible = tasks
+  const activeTasks = tasks.filter(t => !t.archived);
+  const archivedTasks = tasks.filter(t => t.archived);
+  const visible = (showArchive ? archivedTasks : activeTasks)
     .filter(t => showDone ? true : !t.done)
     .filter(t => filter === "all" || t.category === filter)
-    .sort((a, b) => P_ORDER[a.priority] - P_ORDER[b.priority]);
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
 
-  const doneCount = tasks.filter(t => t.done).length;
-  const openCount = tasks.length - doneCount;
-  const focusTasks = tasks
+  const doneCount = activeTasks.filter(t => t.done).length;
+  const openCount = activeTasks.filter(t => !t.done).length;
+  const focusTasks = activeTasks
     .filter(t => !t.done && (t.priority === "🔴 urgent" || t.priority === "🟡 soon"))
     .sort((a, b) => P_ORDER[a.priority] - P_ORDER[b.priority]);
 
   const syncDot = { synced: "#4caf50", saving: "#f5a623", connecting: "#888", error: "#e53935" }[syncStatus];
-  const syncLabel = { synced: "synced", saving: "saving...", connecting: "connecting...", error: "sync error" }[syncStatus];
+  const syncLabel = { synced: "synced", saving: "saving...", connecting: "connecting...", error: "error" }[syncStatus];
 
   const inputStyle = {
     width: "100%", background: "transparent", border: "none",
@@ -347,30 +332,33 @@ export default function App() {
     padding: "6px 0 7px", outline: "none", marginBottom: 10, boxSizing: "border-box",
   };
 
+  const Checkbox = ({ checked, onClick, size = 16 }) => (
+    <button onClick={onClick} style={{
+      background: checked ? T.accent : "transparent",
+      border: `1.5px solid ${T.accent}`, color: checked ? T.accentText : "transparent",
+      fontSize: size * 0.7, cursor: "pointer", padding: 0, flexShrink: 0,
+      width: size, height: size, borderRadius: 2,
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontFamily: "'Courier New', monospace", fontWeight: "bold",
+    }}>{checked ? "✓" : ""}</button>
+  );
+
   if (!loaded) return (
-    <div style={{ color: T.textMuted, padding: 24, fontFamily: "'Courier New', monospace", background: T.bg, height: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ color: T.textMuted, fontFamily: "'Courier New', monospace", background: T.bg, height: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <span style={{ color: T.accent }}>loading fern's list...</span>
     </div>
   );
 
   const sidebar = (
     <div style={{
-      ...(mobile
-        ? { padding: "12px 16px", borderBottom: `1px solid ${T.border}` }
-        : { width: 230, flexShrink: 0, borderRight: `1px solid ${T.border}`, padding: "16px 14px", overflowY: "auto" }
-      ),
+      ...(mobile ? { padding: "12px 16px", borderBottom: `1px solid ${T.border}` } : { width: 230, flexShrink: 0, borderRight: `1px solid ${T.border}`, padding: "16px 14px", overflowY: "auto" }),
       display: "flex", flexDirection: "column", gap: 4, background: T.bg,
     }}>
       <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginTop: 8, marginBottom: 4 }}>new task</div>
       <div style={{ background: T.surface, border: `1px solid ${T.border3}`, borderRadius: 5, padding: 12, marginBottom: 8 }}>
-        <input
-          style={inputStyle}
-          placeholder="what needs doing..."
-          value={newTask}
-          onChange={e => setNewTask(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && addTask()}
-        />
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <input style={inputStyle} placeholder="what needs doing..." value={newTask}
+          onChange={e => setNewTask(e.target.value)} onKeyDown={e => e.key === "Enter" && addTask()} />
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
           <select style={{ background: T.bg, border: `1px solid ${T.border2}`, color: T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "6px", borderRadius: 4, cursor: "pointer", flex: 1, minWidth: 0 }}
             value={newPri} onChange={e => setNewPri(e.target.value)}>
             {PRIORITIES.map(p => <option key={p}>{p}</option>)}
@@ -380,8 +368,12 @@ export default function App() {
             {CATEGORIES.map(c => <option key={c}>{c}</option>)}
           </select>
         </div>
-        <button
-          style={{ width: "100%", marginTop: 10, background: T.accent, border: "none", color: T.accentText, fontFamily: "'Courier New', monospace", fontWeight: "bold", fontSize: TS - 1, padding: "9px", borderRadius: 4, cursor: "pointer" }}
+        <div style={{ marginBottom: 8 }}>
+          <input type="date" style={{ background: T.bg, border: `1px solid ${T.border2}`, color: newDue ? T.text : T.textDim, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "6px 8px", borderRadius: 4, outline: "none", width: "100%", boxSizing: "border-box" }}
+            value={newDue} onChange={e => setNewDue(e.target.value)} />
+          <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 1, marginTop: 3 }}>due date (optional)</div>
+        </div>
+        <button style={{ width: "100%", background: T.accent, border: "none", color: T.accentText, fontFamily: "'Courier New', monospace", fontWeight: "bold", fontSize: TS - 1, padding: "9px", borderRadius: 4, cursor: "pointer" }}
           onClick={addTask}>+ add task</button>
       </div>
 
@@ -392,9 +384,12 @@ export default function App() {
             style={{ background: filter === c ? T.accentBg : "transparent", border: `1px solid ${filter === c ? T.accent : T.border}`, color: filter === c ? T.accent : T.textDim, fontFamily: "'Courier New', monospace", fontSize: TS - 3, padding: "6px 10px", borderRadius: 4, cursor: "pointer" }}
             onClick={() => setFilter(c)}>{c}</button>
         ))}
-        <button
-          style={{ background: showDone ? T.accentBg : "transparent", border: `1px dashed ${showDone ? T.accent : T.border}`, color: showDone ? T.accent : T.textDim, fontFamily: "'Courier New', monospace", fontSize: TS - 3, padding: "6px 10px", borderRadius: 4, cursor: "pointer" }}
+        <button style={{ background: showDone ? T.accentBg : "transparent", border: `1px dashed ${showDone ? T.accent : T.border}`, color: showDone ? T.accent : T.textDim, fontFamily: "'Courier New', monospace", fontSize: TS - 3, padding: "6px 10px", borderRadius: 4, cursor: "pointer" }}
           onClick={() => setShowDone(!showDone)}>✓ done</button>
+        <button style={{ background: showArchive ? "#2a1a1a" : "transparent", border: `1px dashed ${showArchive ? T.danger : T.border}`, color: showArchive ? T.danger : T.textDim, fontFamily: "'Courier New', monospace", fontSize: TS - 3, padding: "6px 10px", borderRadius: 4, cursor: "pointer" }}
+          onClick={() => setShowArchive(!showArchive)}>
+          ⬚ archive{archivedTasks.length > 0 ? ` (${archivedTasks.length})` : ""}
+        </button>
       </div>
     </div>
   );
@@ -415,20 +410,27 @@ export default function App() {
             <p style={{ fontSize: TS - 2, color: T.textMuted, marginBottom: 16 }}>Here's what needs attention:</p>
             {focusTasks.length === 0
               ? <p style={{ fontSize: TS, color: T.textDim }}>Nothing urgent — good day for a "whenever" task.</p>
-              : focusTasks.map(t => (
-                <div key={t.id} style={{ marginBottom: 14 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                    <span style={{ fontSize: TS - 3, background: T.surface2, border: `1px solid ${T.border2}`, borderRadius: 3, padding: "2px 5px" }}>{t.priority}</span>
-                    <span style={{ fontSize: TS }}>{t.text}</span>
-                  </div>
-                  {t.subtasks.filter(s => !s.done).map(sub => (
-                    <div key={sub.id} style={{ display: "flex", gap: 6, padding: "2px 0 2px 18px" }}>
-                      <span style={{ color: T.accent, fontSize: TS }}>·</span>
-                      <span style={{ fontSize: TS - 2, color: T.textMuted }}>{sub.text}</span>
+              : focusTasks.map(t => {
+                const overdue = isOverdue(t.due_date);
+                const soon = isDueSoon(t.due_date);
+                return (
+                  <div key={t.id} style={{ marginBottom: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: TS - 3, background: T.surface2, border: `1px solid ${T.border2}`, borderRadius: 3, padding: "2px 5px" }}>{t.priority}</span>
+                      <span style={{ fontSize: TS, flex: 1 }}>{t.text}</span>
+                      {t.due_date && <span style={{ fontSize: TS - 4, color: overdue ? T.danger : soon ? T.warning : T.textMuted, fontWeight: overdue ? "bold" : "normal" }}>
+                        {overdue ? "OVERDUE" : `due ${new Date(t.due_date).toLocaleDateString()}`}
+                      </span>}
                     </div>
-                  ))}
-                </div>
-              ))
+                    {t.subtasks.filter(s => !s.done).map(sub => (
+                      <div key={sub.id} style={{ display: "flex", gap: 6, padding: "2px 0 2px 18px" }}>
+                        <span style={{ color: T.accent }}>·</span>
+                        <span style={{ fontSize: TS - 2, color: T.textMuted }}>{sub.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })
             }
             <button style={{ marginTop: 16, width: "100%", background: T.accent, border: "none", color: T.accentText, fontFamily: "'Courier New', monospace", fontWeight: "bold", fontSize: TS, padding: "11px", borderRadius: 4, cursor: "pointer", letterSpacing: 2 }}
               onClick={() => setCheckIn(false)}>let's get it</button>
@@ -446,52 +448,40 @@ export default function App() {
               <span style={{ fontSize: TS + 2, fontWeight: "bold", letterSpacing: 2, color: T.accent }}>SETTINGS</span>
               <button style={{ background: "none", border: "none", color: T.textDim, fontSize: 22, cursor: "pointer" }} onClick={() => setShowSettings(false)}>×</button>
             </div>
-
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>theme</div>
               <div style={{ display: "flex", gap: 8 }}>
                 {["dark", "light"].map(t => (
-                  <button key={t}
-                    style={{ flex: 1, padding: "8px", borderRadius: 4, border: `1px solid ${theme === t ? T.accent : T.border2}`, background: theme === t ? T.accentBg : "transparent", color: theme === t ? T.accent : T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 1, cursor: "pointer" }}
+                  <button key={t} style={{ flex: 1, padding: "8px", borderRadius: 4, border: `1px solid ${theme === t ? T.accent : T.border2}`, background: theme === t ? T.accentBg : "transparent", color: theme === t ? T.accent : T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 1, cursor: "pointer" }}
                     onClick={() => saveTheme(t)}>{t}</button>
                 ))}
               </div>
             </div>
-
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>text size</div>
               <div style={{ display: "flex", gap: 8 }}>
                 {["small", "medium", "large"].map(s => (
-                  <button key={s}
-                    style={{ flex: 1, padding: "8px", borderRadius: 4, border: `1px solid ${textSize === s ? T.accent : T.border2}`, background: textSize === s ? T.accentBg : "transparent", color: textSize === s ? T.accent : T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 1, cursor: "pointer" }}
+                  <button key={s} style={{ flex: 1, padding: "8px", borderRadius: 4, border: `1px solid ${textSize === s ? T.accent : T.border2}`, background: textSize === s ? T.accentBg : "transparent", color: textSize === s ? T.accent : T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 1, cursor: "pointer" }}
                     onClick={() => saveTextSize(s)}>{s}</button>
                 ))}
               </div>
             </div>
-
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>your board id</div>
               <div style={{ fontSize: TS - 3, color: T.textMuted, marginBottom: 6 }}>Copy this to sync on another device</div>
               <div style={{ display: "flex", gap: 6 }}>
-                <input readOnly value={boardId}
-                  style={{ flex: 1, background: T.bg, border: `1px solid ${T.border2}`, color: T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 3, padding: "7px 8px", borderRadius: 4, outline: "none" }} />
-                <button
-                  style={{ background: T.accent, border: "none", color: T.accentText, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "7px 12px", borderRadius: 4, cursor: "pointer", fontWeight: "bold" }}
+                <input readOnly value={boardId} style={{ flex: 1, background: T.bg, border: `1px solid ${T.border2}`, color: T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 3, padding: "7px 8px", borderRadius: 4, outline: "none" }} />
+                <button style={{ background: T.accent, border: "none", color: T.accentText, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "7px 12px", borderRadius: 4, cursor: "pointer", fontWeight: "bold" }}
                   onClick={() => navigator.clipboard.writeText(boardId)}>copy</button>
               </div>
             </div>
-
             <div>
               <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>use existing board</div>
               <div style={{ fontSize: TS - 3, color: T.textMuted, marginBottom: 6 }}>Paste a board ID from another device</div>
               <div style={{ display: "flex", gap: 6 }}>
-                <input
-                  placeholder="paste board id..."
-                  value={importId}
-                  onChange={e => setImportId(e.target.value)}
+                <input placeholder="paste board id..." value={importId} onChange={e => setImportId(e.target.value)}
                   style={{ flex: 1, background: T.bg, border: `1px solid ${T.border2}`, color: T.text, fontFamily: "'Courier New', monospace", fontSize: TS - 3, padding: "7px 8px", borderRadius: 4, outline: "none" }} />
-                <button
-                  style={{ background: "transparent", border: `1px solid ${T.accent}`, color: T.accent, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "7px 12px", borderRadius: 4, cursor: "pointer" }}
+                <button style={{ background: "transparent", border: `1px solid ${T.accent}`, color: T.accent, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "7px 12px", borderRadius: 4, cursor: "pointer" }}
                   onClick={handleImportId}>switch</button>
               </div>
             </div>
@@ -508,7 +498,7 @@ export default function App() {
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: syncDot, display: "inline-block" }} />
             {!mobile && syncLabel}
           </span>
-          <button style={{ background: T.surface, border: `1px solid ${T.accent}`, color: T.accent, fontFamily: "'Courier New', monospace", fontSize: 11, fontWeight: "bold", padding: "7px 10px", borderRadius: 5, cursor: "pointer", letterSpacing: 1, whiteSpace: "nowrap" }}
+          <button style={{ background: T.surface, border: `1px solid ${T.accent}`, color: T.accent, fontFamily: "'Courier New', monospace", fontSize: 11, fontWeight: "bold", padding: "7px 10px", borderRadius: 5, cursor: "pointer", whiteSpace: "nowrap" }}
             onClick={() => setCheckIn(true)}>☀ check-in</button>
           <button style={{ background: T.surface, border: `1px solid ${T.border2}`, color: T.textMuted, fontFamily: "'Courier New', monospace", fontSize: 14, padding: "5px 10px", borderRadius: 5, cursor: "pointer" }}
             onClick={() => setShowSettings(true)}>⚙</button>
@@ -524,65 +514,107 @@ export default function App() {
         {mobile ? (panelOpen && sidebar) : sidebar}
 
         <div style={{ flex: 1, padding: mobile ? "10px 8px" : "16px 20px", overflowY: "auto", background: T.bg }}>
-          {visible.length === 0 && (
-            <div style={{ color: T.border2, textAlign: "center", padding: 60, fontSize: TS }}>nothing here</div>
+          {showArchive && (
+            <div style={{ fontSize: TS - 2, color: T.danger, marginBottom: 12, padding: "6px 10px", border: `1px solid ${T.danger}`, borderRadius: 4, background: "#2a1a1a" }}>
+              viewing archive — {archivedTasks.length} task{archivedTasks.length !== 1 ? "s" : ""}
+            </div>
           )}
-          {visible.map(t => {
+          {visible.length === 0 && <div style={{ color: T.border2, textAlign: "center", padding: 60, fontSize: TS }}>nothing here</div>}
+          {visible.map((t, idx) => {
             const isExp = expanded[t.id];
             const subDone = t.subtasks.filter(s => s.done).length;
             const isEditing = editingId === t.id;
+            const overdue = isOverdue(t.due_date);
+            const soon = isDueSoon(t.due_date);
             return (
-              <div key={t.id} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 6, marginBottom: 8, opacity: t.done ? 0.4 : 1 }}>
-                <div style={{ display: "flex", alignItems: "flex-start", gap: mobile ? 8 : 10, padding: mobile ? "10px 10px" : "11px 13px" }}>
-                  <button style={{ background: "none", border: "none", color: T.accent, fontSize: TS + 2, cursor: "pointer", padding: "4px", marginTop: 1, flexShrink: 0 }}
-                    onClick={() => toggle(t.id)}>{t.done ? "✓" : "□"}</button>
+              <div key={t.id} style={{ background: T.surface, border: `1px solid ${overdue && !t.done ? T.danger : T.border}`, borderRadius: 6, marginBottom: 8, opacity: t.done ? 0.4 : 1 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: mobile ? 6 : 8, padding: mobile ? "10px 8px" : "11px 13px" }}>
+                  {/* Reorder */}
+                  {!showArchive && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 0, flexShrink: 0, marginTop: 1 }}>
+                      <button style={{ background: "none", border: "none", color: idx === 0 ? T.border : T.textFaint, fontSize: 9, cursor: idx === 0 ? "default" : "pointer", padding: "2px 4px", lineHeight: 1 }}
+                        onClick={() => idx > 0 && moveTask(t.id, -1)}>▲</button>
+                      <button style={{ background: "none", border: "none", color: idx === visible.length - 1 ? T.border : T.textFaint, fontSize: 9, cursor: idx === visible.length - 1 ? "default" : "pointer", padding: "2px 4px", lineHeight: 1 }}
+                        onClick={() => idx < visible.length - 1 && moveTask(t.id, 1)}>▼</button>
+                    </div>
+                  )}
+                  <div style={{ marginTop: 3, flexShrink: 0 }}>
+                    <Checkbox checked={t.done} onClick={() => toggle(t.id)} size={16} />
+                  </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {isEditing ? (
-                      <input
-                        style={{ ...inputStyle, marginBottom: 4 }}
-                        value={editText}
+                      <input style={{ ...inputStyle, marginBottom: 4 }} value={editText}
                         onChange={e => setEditText(e.target.value)}
                         onKeyDown={e => { if (e.key === "Enter") saveEdit(t.id); if (e.key === "Escape") setEditingId(null); }}
-                        onBlur={() => saveEdit(t.id)}
-                        autoFocus
-                      />
+                        onBlur={() => saveEdit(t.id)} autoFocus />
                     ) : (
-                      <span
-                        style={{ fontSize: TS, lineHeight: 1.5, display: "block", wordBreak: "break-word", cursor: "text", textAlign: "left" }}
+                      <span style={{ fontSize: TS, lineHeight: 1.5, display: "block", wordBreak: "break-word", cursor: "text", textDecoration: t.done ? "line-through" : "none" }}
                         onClick={() => { setEditingId(t.id); setEditText(t.text); }}>{t.text}</span>
                     )}
-                    <div style={{ display: "flex", gap: 4, marginTop: 5, flexWrap: "wrap", alignItems: "center" }}>
-                      <select
-                        style={{ fontSize: TS - 4, background: T.surface2, border: `1px solid ${T.border2}`, color: T.textMuted, fontFamily: "'Courier New', monospace", padding: "2px 4px", borderRadius: 3, cursor: "pointer" }}
-                        value={t.priority} onChange={e => changePri(t.id, e.target.value)}>
+                    <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap", alignItems: "center" }}>
+                      <select style={{ fontSize: TS - 4, background: T.surface2, border: `1px solid ${T.border2}`, color: T.textMuted, fontFamily: "'Courier New', monospace", padding: "2px 4px", borderRadius: 3, cursor: "pointer" }}
+                        value={t.priority} onChange={e => mutate(t.id, { priority: e.target.value })}>
                         {PRIORITIES.map(p => <option key={p}>{p}</option>)}
                       </select>
-                      <select
-                        style={{ fontSize: TS - 4, background: T.surface2, border: `1px solid ${T.border3}`, color: T.textMuted, fontFamily: "'Courier New', monospace", padding: "2px 4px", borderRadius: 3, cursor: "pointer" }}
-                        value={t.category} onChange={e => changeCat(t.id, e.target.value)}>
+                      <select style={{ fontSize: TS - 4, background: T.surface2, border: `1px solid ${T.border3}`, color: T.textMuted, fontFamily: "'Courier New', monospace", padding: "2px 4px", borderRadius: 3, cursor: "pointer" }}
+                        value={t.category} onChange={e => mutate(t.id, { category: e.target.value })}>
                         {CATEGORIES.map(c => <option key={c}>{c}</option>)}
                       </select>
-                      <span style={{ fontSize: TS - 4, color: T.textFaint }}>{t.created}</span>
-                      {t.subtasks.length > 0 && (
-                        <span style={{ fontSize: TS - 4, color: T.accent, opacity: 0.7 }}>{subDone}/{t.subtasks.length}</span>
+                      {t.due_date && (
+                        <span style={{ fontSize: TS - 4, color: overdue ? T.danger : soon ? T.warning : T.textFaint, fontWeight: overdue ? "bold" : "normal" }}>
+                          {overdue ? "OVERDUE" : `due ${new Date(t.due_date).toLocaleDateString()}`}
+                        </span>
                       )}
+                      {t.notes && <span style={{ fontSize: TS - 4, color: T.textDim }}>✎</span>}
+                      {t.subtasks.length > 0 && <span style={{ fontSize: TS - 4, color: T.accent, opacity: 0.7 }}>{subDone}/{t.subtasks.length}</span>}
                     </div>
                   </div>
-                  <button style={{ background: "none", border: `1px solid ${T.border2}`, color: T.textMuted, fontSize: TS - 1, cursor: "pointer", padding: "3px 7px", borderRadius: 3, flexShrink: 0 }}
+                  <button style={{ background: "none", border: "none", color: isExp ? T.accent : T.textDim, fontSize: TS + 2, cursor: "pointer", padding: "4px 6px", flexShrink: 0 }}
                     onClick={() => setExpanded(p => ({ ...p, [t.id]: !p[t.id] }))}>{isExp ? "▾" : "▸"}</button>
-                  <button style={{ background: "none", border: "none", color: T.textDim, fontSize: TS + 6, cursor: "pointer", padding: "4px", lineHeight: 1, flexShrink: 0 }}
-                    onClick={() => remove(t.id)}>×</button>
+                  {showArchive ? (
+                    <button style={{ background: "none", border: `1px solid ${T.border2}`, color: T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 3, cursor: "pointer", padding: "3px 7px", borderRadius: 3, flexShrink: 0 }}
+                      onClick={() => mutate(t.id, { archived: false })}>restore</button>
+                  ) : (
+                    <button style={{ background: "none", border: "none", color: T.textFaint, fontSize: TS + 2, cursor: "pointer", padding: "4px", lineHeight: 1, flexShrink: 0 }} title="Archive"
+                      onClick={() => mutate(t.id, { archived: true })}>⬚</button>
+                  )}
                 </div>
 
                 {isExp && (
-                  <div style={{ borderTop: `1px solid ${T.border}`, padding: mobile ? "8px 10px 11px 28px" : "8px 13px 11px 40px" }}>
-                    {t.subtasks.length === 0 && (
-                      <div style={{ fontSize: TS - 2, color: T.border2, marginBottom: 6 }}>no subtasks yet</div>
-                    )}
+                  <div style={{ borderTop: `1px solid ${T.border}`, padding: mobile ? "10px 8px 12px 24px" : "10px 13px 12px 44px" }}>
+                    {/* Notes */}
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginBottom: 4 }}>notes</div>
+                      <textarea
+                        style={{ width: "100%", background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 4, color: T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "7px 8px", outline: "none", resize: "vertical", minHeight: 60, boxSizing: "border-box", lineHeight: 1.5 }}
+                        placeholder="add notes..."
+                        value={t.notes || ""}
+                        onChange={e => mutate(t.id, { notes: e.target.value })}
+                      />
+                    </div>
+
+                    {/* Due date */}
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginBottom: 4 }}>due date</div>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input type="date"
+                          style={{ background: T.bg, border: `1px solid ${T.border2}`, borderRadius: 4, color: t.due_date ? (overdue ? T.danger : T.text) : T.textDim, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "5px 8px", outline: "none", cursor: "pointer" }}
+                          value={t.due_date || ""}
+                          onChange={e => mutate(t.id, { due_date: e.target.value || null })}
+                        />
+                        {t.due_date && (
+                          <button style={{ background: "none", border: "none", color: T.textDim, fontSize: TS + 2, cursor: "pointer", padding: "4px" }}
+                            onClick={() => mutate(t.id, { due_date: null })}>×</button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Subtasks */}
+                    <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 }}>subtasks</div>
+                    {t.subtasks.length === 0 && <div style={{ fontSize: TS - 2, color: T.border2, marginBottom: 6 }}>no subtasks yet</div>}
                     {t.subtasks.map(sub => (
                       <div key={sub.id} style={{ display: "flex", alignItems: "center", gap: 7, padding: "4px 0" }}>
-                        <button style={{ background: "none", border: "none", color: T.accent, fontSize: TS, cursor: "pointer", padding: "4px", width: 20, flexShrink: 0 }}
-                          onClick={() => toggleSub(t.id, sub.id)}>{sub.done ? "✓" : "□"}</button>
+                        <Checkbox checked={sub.done} onClick={() => toggleSub(t.id, sub.id)} size={13} />
                         <span style={{ flex: 1, fontSize: TS - 2, color: sub.done ? T.textFaint : T.textMuted, textDecoration: sub.done ? "line-through" : "none" }}>{sub.text}</span>
                         <button style={{ background: "none", border: "none", color: T.textFaint, fontSize: TS + 2, cursor: "pointer", padding: "4px" }}
                           onClick={() => removeSub(t.id, sub.id)}>×</button>
@@ -590,17 +622,19 @@ export default function App() {
                     ))}
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 7 }}>
                       <span style={{ color: T.textFaint, fontSize: TS }}>└</span>
-                      <input
-                        style={{ flex: 1, background: "transparent", border: "none", borderBottom: `1px solid ${T.subInputBorder}`, color: T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "4px 0", outline: "none" }}
-                        placeholder="add subtask..."
-                        value={subInputs[t.id] || ""}
+                      <input style={{ flex: 1, background: "transparent", border: "none", borderBottom: `1px solid ${T.subInputBorder}`, color: T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 2, padding: "4px 0", outline: "none" }}
+                        placeholder="add subtask..." value={subInputs[t.id] || ""}
                         onChange={e => setSubInputs(p => ({ ...p, [t.id]: e.target.value }))}
-                        onKeyDown={e => e.key === "Enter" && addSub(t.id)}
-                      />
-                      <button
-                        style={{ background: "none", border: `1px solid ${T.border2}`, color: T.accent, fontFamily: "'Courier New', monospace", fontSize: TS, padding: "3px 9px", borderRadius: 3, cursor: "pointer" }}
+                        onKeyDown={e => e.key === "Enter" && addSub(t.id)} />
+                      <button style={{ background: "none", border: `1px solid ${T.border2}`, color: T.accent, fontFamily: "'Courier New', monospace", fontSize: TS, padding: "3px 9px", borderRadius: 3, cursor: "pointer" }}
                         onClick={() => addSub(t.id)}>+</button>
                     </div>
+
+                    {/* Permanent delete from archive */}
+                    {showArchive && (
+                      <button style={{ marginTop: 12, background: "none", border: `1px solid ${T.danger}`, color: T.danger, fontFamily: "'Courier New', monospace", fontSize: TS - 3, padding: "4px 10px", borderRadius: 3, cursor: "pointer" }}
+                        onClick={() => remove(t.id)}>permanently delete</button>
+                    )}
                   </div>
                 )}
               </div>
