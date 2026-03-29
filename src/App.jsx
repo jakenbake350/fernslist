@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase, getBoardId, setBoardId } from "./supabase";
+import { registerServiceWorker, getNotificationPermission, subscribeToPush, unsubscribeFromPush } from "./notifications";
 
 const PRIORITIES = ["🔴 urgent", "🟡 soon", "🟢 whenever"];
 const CATEGORIES = ["printer", "business", "home", "health", "finance", "tech", "other"];
@@ -147,6 +148,7 @@ export default function App() {
   const [textSize, setTextSize] = useState(() => localStorage.getItem("fern-text-size") || "medium");
   const [boardId] = useState(() => getBoardId());
   const [importId, setImportId] = useState("");
+  const [notifPermission, setNotifPermission] = useState(() => "Notification" in window ? Notification.permission : "unsupported");
   const width = useWidth();
   const mobile = width < 700;
   const T = THEMES[theme];
@@ -298,6 +300,19 @@ export default function App() {
       });
     });
   }, [upsertTask]);
+
+  useEffect(() => { registerServiceWorker(); }, []);
+
+  const enableNotifications = async () => {
+    const perm = await getNotificationPermission();
+    setNotifPermission(perm);
+    if (perm === "granted") await subscribeToPush(boardId);
+  };
+
+  const disableNotifications = async () => {
+    await unsubscribeFromPush(boardId);
+    setNotifPermission("default");
+  };
 
   const saveTheme = (t) => { setTheme(t); localStorage.setItem("fern-theme", t); };
   const saveTextSize = (s) => { setTextSize(s); localStorage.setItem("fern-text-size", s); };
@@ -475,6 +490,30 @@ export default function App() {
                   onClick={() => navigator.clipboard.writeText(boardId)}>copy</button>
               </div>
             </div>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>notifications</div>
+              {notifPermission === "unsupported" && (
+                <div style={{ fontSize: TS - 2, color: T.textDim }}>Not supported in this browser.</div>
+              )}
+              {notifPermission === "denied" && (
+                <div style={{ fontSize: TS - 2, color: T.danger }}>Blocked by browser — enable in site settings.</div>
+              )}
+              {notifPermission === "granted" && (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: TS - 2, color: "#4caf50" }}>✓ notifications enabled</span>
+                  <button style={{ background: "transparent", border: `1px solid ${T.border2}`, color: T.textDim, fontFamily: "'Courier New', monospace", fontSize: TS - 3, padding: "5px 10px", borderRadius: 4, cursor: "pointer" }}
+                    onClick={disableNotifications}>disable</button>
+                </div>
+              )}
+              {(notifPermission === "default" || notifPermission === "") && (
+                <button style={{ width: "100%", background: T.accent, border: "none", color: T.accentText, fontFamily: "'Courier New', monospace", fontWeight: "bold", fontSize: TS - 1, padding: "9px", borderRadius: 4, cursor: "pointer" }}
+                  onClick={enableNotifications}>enable push notifications</button>
+              )}
+              <div style={{ fontSize: TS - 4, color: T.textDim, marginTop: 6 }}>
+                Daily reminders for overdue and due-soon tasks.
+              </div>
+            </div>
+
             <div>
               <div style={{ fontSize: 9, color: T.textDim, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>use existing board</div>
               <div style={{ fontSize: TS - 3, color: T.textMuted, marginBottom: 6 }}>Paste a board ID from another device</div>
