@@ -20,60 +20,60 @@ function isDueSoon(due_date: string) {
   return diff >= 0 && diff <= 3;
 }
 
+async function sendPush(sub: { endpoint: string; p256dh: string; auth: string }, title: string, body: string) {
+  try {
+    await webpush.sendNotification(
+      { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+      JSON.stringify({ title, body, tag: "fernslist-reminder" })
+    );
+    return true;
+  } catch (e: unknown) {
+    if (e instanceof Error && e.message?.includes("410")) {
+      await supabase.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+    }
+    return false;
+  }
+}
+
 Deno.serve(async () => {
-  // Get all active tasks with due dates
+  const { data: subs } = await supabase.from("push_subscriptions").select("*");
+  if (!subs || subs.length === 0) return new Response("No subscriptions", { status: 200 });
+
   const { data: tasks } = await supabase
     .from("tasks")
     .select("*")
     .eq("done", false)
-    .eq("archived", false)
-    .not("due_date", "is", null);
+    .eq("archived", false);
 
-  if (!tasks || tasks.length === 0) {
-    return new Response("No tasks to notify", { status: 200 });
-  }
-
-  // Group by board_id, find tasks that need notification
-  const byBoard: Record<string, { overdue: string[]; soon: string[] }> = {};
-  for (const task of tasks) {
-    const bid = task.board_id;
-    if (!byBoard[bid]) byBoard[bid] = { overdue: [], soon: [] };
-    if (isOverdue(task.due_date)) byBoard[bid].overdue.push(task.text);
-    else if (isDueSoon(task.due_date)) byBoard[bid].soon.push(task.text);
-  }
-
-  // Get all push subscriptions
-  const { data: subs } = await supabase.from("push_subscriptions").select("*");
-  if (!subs) return new Response("No subscriptions", { status: 200 });
+  const { data: boards } = await supabase.from("boards").select("*");
 
   let sent = 0;
+
   for (const sub of subs) {
-    const board = byBoard[sub.board_id];
-    if (!board) continue;
+    const boardTasks = (tasks || []).filter(t => t.board_id === sub.board_id);
+    const board = (boards || []).find(b => b.board_id === sub.board_id);
 
-    const parts = [];
-    if (board.overdue.length > 0) parts.push(`${board.overdue.length} overdue`);
-    if (board.soon.length > 0) parts.push(`${board.soon.length} due soon`);
-    if (parts.length === 0) continue;
+    const overdue = boardTasks.filter(t => t.due_date && isOverdue(t.due_date));
+    const soon = boardTasks.filter(t => t.due_date && isDueSoon(t.due_date));
 
-    const firstTask = board.overdue[0] || board.soon[0];
-    const title = parts.join(" · ");
-    const body = firstTask + (board.overdue.length + board.soon.length > 1
-      ? ` +${board.overdue.length + board.soon.length - 1} more`
-      : "");
-
-    try {
-      await webpush.sendNotification(
-        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-        JSON.stringify({ title: `Fern's List — ${title}`, body, tag: "fernslist-reminder" })
-      );
-      sent++;
-    } catch (e: unknown) {
-      // Remove dead subscriptions
-      if (e instanceof Error && e.message?.includes("410")) {
-        await supabase.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+    if (overdue.length > 0 || soon.length > 0) {
+      // Specific task alerts
+      const parts = [];
+      if (overdue.length > 0) parts.push(`${overdue.length} overdue`);
+      if (soon.length > 0) parts.push(`${soon.length} due soon`);
+      const firstTask = overdue[0]?.text || soon[0]?.text;
+      const extra = overdue.length + soon.length - 1;
+      const body = firstTask + (extra > 0 ? ` +${extra} more` : "");
+      if (await sendPush(sub, `Fern's List — ${parts.join(" · ")}`, body)) sent++;
+    } else if (board) {
+      // Inactive board nudge — hasn't opened in 7+ days
+      const lastOpened = new Date(board.last_opened);
+      const daysSince = (Date.now() - lastOpened.getTime()) / (1000 * 60 * 60 * 24);
+      if (daysSince >= 7) {
+        if (await sendPush(sub, "Fern's List", "You haven't checked your list in a week — anything new to add?")) sent++;
       }
     }
+    // else: nothing urgent, opened recently → no notification
   }
 
   return new Response(`Sent ${sent} notifications`, { status: 200 });

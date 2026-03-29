@@ -303,6 +303,11 @@ export default function App() {
 
   useEffect(() => { registerServiceWorker(); }, []);
 
+  // Update last_opened on load
+  useEffect(() => {
+    supabase.from("boards").upsert({ board_id: boardId, last_opened: new Date().toISOString() });
+  }, [boardId]);
+
   const enableNotifications = async () => {
     const perm = await getNotificationPermission();
     setNotifPermission(perm);
