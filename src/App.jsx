@@ -575,10 +575,10 @@ export default function App() {
                 <div style={{ display: "flex", alignItems: "flex-start", gap: mobile ? 6 : 8, padding: mobile ? "10px 8px" : "11px 13px" }}>
                   {/* Reorder */}
                   {!showArchive && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 0, flexShrink: 0, marginTop: 1 }}>
-                      <button style={{ background: "none", border: "none", color: idx === 0 ? T.border : T.textFaint, fontSize: 9, cursor: idx === 0 ? "default" : "pointer", padding: "2px 4px", lineHeight: 1 }}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
+                      <button style={{ background: "none", border: "none", color: idx === 0 ? T.border : T.textMuted, fontSize: mobile ? 16 : 13, cursor: idx === 0 ? "default" : "pointer", padding: mobile ? "6px 8px" : "3px 6px", lineHeight: 1 }}
                         onClick={() => idx > 0 && moveTask(t.id, -1)}>▲</button>
-                      <button style={{ background: "none", border: "none", color: idx === visible.length - 1 ? T.border : T.textFaint, fontSize: 9, cursor: idx === visible.length - 1 ? "default" : "pointer", padding: "2px 4px", lineHeight: 1 }}
+                      <button style={{ background: "none", border: "none", color: idx === visible.length - 1 ? T.border : T.textMuted, fontSize: mobile ? 16 : 13, cursor: idx === visible.length - 1 ? "default" : "pointer", padding: mobile ? "6px 8px" : "3px 6px", lineHeight: 1 }}
                         onClick={() => idx < visible.length - 1 && moveTask(t.id, 1)}>▼</button>
                     </div>
                   )}
@@ -613,7 +613,7 @@ export default function App() {
                       {t.subtasks.length > 0 && <span style={{ fontSize: TS - 4, color: T.accent, opacity: 0.7 }}>{subDone}/{t.subtasks.length}</span>}
                     </div>
                   </div>
-                  <button style={{ background: "none", border: "none", color: isExp ? T.accent : T.textDim, fontSize: TS + 2, cursor: "pointer", padding: "4px 6px", flexShrink: 0 }}
+                  <button style={{ background: "none", border: "none", color: isExp ? T.accent : T.textDim, fontSize: mobile ? TS + 8 : TS + 2, cursor: "pointer", padding: mobile ? "8px 10px" : "4px 6px", flexShrink: 0 }}
                     onClick={() => setExpanded(p => ({ ...p, [t.id]: !p[t.id] }))}>{isExp ? "▾" : "▸"}</button>
                   {showArchive ? (
                     <button style={{ background: "none", border: `1px solid ${T.border2}`, color: T.textMuted, fontFamily: "'Courier New', monospace", fontSize: TS - 3, cursor: "pointer", padding: "3px 7px", borderRadius: 3, flexShrink: 0 }}
